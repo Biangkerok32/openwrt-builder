@@ -1,0 +1,104 @@
+name: openwrt-hk1-mini
+
+on:
+  schedule:
+    - cron: '0 18 4/15 * *' # Runs at 02:00 UTC+8 on the 5 and 20th of every month.
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Jakarta
+  BUILD_TARGET: hk1mini
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build-openwrt:
+    runs-on: ubuntu-20.04
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.action == 'run-build-op-aarch64'
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Workspace init
+        run: |
+          echo "DISTRO_VERSION=$(date +'v%y.%m.%d')" >> $GITHUB_ENV
+          sudo bash $GITHUB_WORKSPACE/scripts/init-workspace.bash
+          sudo -E apt-get -qq install mount util-linux uuid-runtime fdisk parted dosfstools e2fsprogs btrfs-progs
+
+      - name: 1-1 Multi-thread compile [aarch64]
+        if: success()
+        run: |
+          bash $GITHUB_WORKSPACE/scripts/prebuild.bash $BUILD_TARGET
+          cd $GITHUB_WORKSPACE/openwrt/
+          make -j $(($(nproc)+1)) V=s
+
+      - name: 1-2 Single-thread compile [aarch64]
+        if: failure()
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt/
+          make -j 1 V=s
+
+      - name: 2 Pack up targets [aarch64]
+        if: success()
+        run: |
+          bash $GITHUB_WORKSPACE/scripts/packup.bash $BUILD_TARGET
+          tree $GITHUB_WORKSPACE/out/
+
+      - name: 3 Package firmware [firmware]
+        if: success()
+        uses: unifreq/openwrt_packit@master
+        env:
+          WHOAMI: Rookie_Zoe
+          GZIP_IMGS: .gz
+          OPENWRT_VER: ${{ env.DISTRO_VERSION }}
+          PACKAGE_SOC: ${{ inputs.openwrt_soc }}
+          OPENWRT_ARMVIRT: out/openwrt-hk1-mini-default-rootfs.tar.gz
+          DISTRIB_REVISION: ${{ env.DISTRO_VERSION }}
+          DISTRIB_DESCRIPTION: OpenWrt ${{ env.DISTRO_VERSION }} Build by Rookie_Zoe & kangris
+          KERNEL_VERSION_NAME: 6.0.2
+
+      - name: 4-1 Upload targets [hk1-mini]
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: openwrt-hk1-mini-${{ env.DISTRO_VERSION }}
+          path: ${{ github.workspace }}/out/
+
+      - name: 4-2 Prepare targets [firmware]
+        run: |
+          tree $PACKAGED_OUTPUTPATH/
+          cd $PACKAGED_OUTPUTPATH/
+          rm -f ./sha256sum
+          touch ./openwrt-hk1-mini.sha256sum
+          find ./ -follow -type f -name "openwrt_*.img" -print | while read -r img; do
+            gzip "$img"
+          done
+          find ./ -follow -type f -name "openwrt_*.qcow2" -print | while read -r img; do
+            gzip "$img"
+          done
+          find $GITHUB_WORKSPACE/out/ -follow -type f -name "*packages*.tar.gz" -print | while read -r file; do
+            mv -f "$file" $PACKAGED_OUTPUTPATH/
+          done
+          find ./ -follow -type f -name "openwrt_*.gz" -print | while read -r img; do
+            sha256sum "$img" >> ./openwrt-hk1-mini.sha256sum
+          done
+          tree $PACKAGED_OUTPUTPATH/
+
+      - name: 5-1 Upload firmware to release
+        if: success()
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.DISTRO_VERSION }}
+          name: ${{ env.DISTRO_VERSION }}
+          body: |
+            Auto released by actions
+            Now is ${{ env.DISTRO_VERSION }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          allowUpdates: true
+          replacesArtifacts: true
+
+      - name: 5-2 Upload targets [firmware]
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: openwrt-hk1-mini_firmware-${{ env.DISTRO_VERSION }}
+          path: ${{ env.PACKAGED_OUTPUTPATH }}/*
